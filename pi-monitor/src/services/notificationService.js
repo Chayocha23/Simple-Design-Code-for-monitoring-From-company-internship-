@@ -5,7 +5,7 @@ const nodemailer = require("nodemailer");
 const config = require("../config/config");
 const logger = require("../utils/logger");
 
-const USE_MOCK = true; // ← เปลี่ยนเป็น false เมื่อพร้อม Production
+const USE_MOCK = false; // ← เปลี่ยนเป็น false เมื่อพร้อม Production
 
 // ----------------------------------------------------------------
 // LINE Messaging API
