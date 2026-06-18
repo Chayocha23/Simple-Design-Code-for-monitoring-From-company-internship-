@@ -9,7 +9,11 @@ const { runMonitorCycle } = require("./services/monitorService");
 // แปลง config.checkIntervalMinutes → cron expression
 // เช่น 5 นาที → "*/5 * * * *" กําหนดและเปลี่ยนแปลงเวลาในไฟล์ .env.example
 // ─────────────────────────────────────────────────────────
-const cronExpression = `*/${config.checkIntervalMinutes} * * * *`;
+//สั่งรันทุกๆหลักนาที (เพื่อทดสอบออโต้ลูป)
+//const cronExpression = `*/${config.checkIntervalMinutes} * * * *`;
+//สั่งรันทุกๆ 10 วินาที (เพื่อทดสอบออโต้ลูป)
+//const cronExpression = `*/10 * * * * *`;
+
 
 logger.info("🚀 Pi Monitor เริ่มทำงาน");
 logger.info(`⏱  ตรวจสอบทุก ${config.checkIntervalMinutes} นาที (cron: "${cronExpression}")`);

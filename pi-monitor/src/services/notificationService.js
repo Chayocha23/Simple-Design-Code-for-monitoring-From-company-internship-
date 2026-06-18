@@ -106,7 +106,7 @@ async function notifyDisplayOffline(displayName) {
 
   await Promise.all([
     sendLineMessage(message),
-    sendEmail(emailSubject, `<pre>${message}</pre>`),
+    //sendEmail(emailSubject, `<pre>${message}</pre>`),
   ]);
 }
 
@@ -129,7 +129,7 @@ async function notifyRemoteFailed(displayName) {
 
   await Promise.all([
     sendLineMessage(message),
-    sendEmail(emailSubject, `<pre>${message}</pre>`),
+    //sendEmail(emailSubject, `<pre>${message}</pre>`),
   ]);
 }
 
@@ -150,7 +150,7 @@ async function notifyPiStillHasIssue(displayName) {
   const message = `\n⚠️ [Pi Monitor] หน้าจอยังมีปัญหาหลัง Restart\nหน้าจอ "${displayName}" ยังคงไม่ปกติ\n⚠️ กรุณาให้เจ้าหน้าที่เข้าตรวจสอบโดยตรง\nเวลา: ${new Date().toLocaleString("th-TH")}`;
   await Promise.all([
     sendLineMessage(message),
-    sendEmail(`[Pi Monitor] ⚠️ ต้องตรวจสอบด่วน: ${displayName}`, `<pre>${message}</pre>`),
+    //sendEmail(`[Pi Monitor] ⚠️ ต้องตรวจสอบด่วน: ${displayName}`, `<pre>${message}</pre>`),
   ]);
 }
 
