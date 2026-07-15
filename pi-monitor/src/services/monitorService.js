@@ -1,174 +1,146 @@
 // src/services/monitorService.js
-// =========================================================
-// หัวใจหลักของระบบ: Logic การทำงานตาม Flowchart ทั้งหมด
-// =========================================================
-const { fetchDisplayStatuses, saveCheckResults } = require("./googleSheetService");
-const {
-  notifyDisplayOffline,
-  notifyRecoverySuccess,
-  notifyRemoteFailed,
-  notifyPiSelfRestartSuccess,
-  notifyPiStillHasIssue,
-} = require("./notificationService");
-const {
-  testSSHConnection,
-  remoteRestartPi,
-  waitForPiToReturn,
-  forceNetworkRestartPi
-} = require("./recoveryService");
+const config = require("../config/config");
+const { saveCheckResults } = require("./googleSheetService");
+const { notifyDisplayOffline, notifyRecoverySuccess, notifyRemoteFailed } = require("./notificationService");
+const { testSSHConnection, checkBrowserProcess } = require("./recoveryService");
 const logger = require("../utils/logger");
 
-// =========================================================
-// ฟังก์ชันหลัก: เรียกทุก X นาทีจาก index.js (via node-cron)
-// =========================================================
 async function runMonitorCycle() {
-  logger.info("========== เริ่มรอบการตรวจสอบ ==========");
+  logger.info("========== เริ่มรอบการตรวจสอบ (All Displays) ==========");
 
-  // ─────────────────────────────────────────────
-  // STEP 1: ดึงข้อมูลสถานะจาก Google Sheet
-  // (ตาม Flowchart: "ดึงข้อมูลสถานะของจอจาก Google Sheet ได้มั้ย?")
-  // ─────────────────────────────────────────────
-  let displayStatuses;
-  try {
-    displayStatuses = await fetchDisplayStatuses();
-    logger.info(`ดึงข้อมูลสำเร็จ: ${displayStatuses.length} จอ`);
-  } catch (err) {
-    // ─────────────────────────────────────────────
-    // STEP 1 FAIL: เชื่อม Google Sheet ไม่ได้ → Backend มีปัญหา
-    // (ตาม Flowchart: "No → Fix Backend ให้เชื่อมต่อและดึงข้อมูลได้")
-    // ─────────────────────────────────────────────
-    logger.error(`❌ ดึงข้อมูลจาก Google Sheet ไม่ได้: ${err.message}`);
-    logger.error("🔧 Backend มีปัญหา — กรุณาตรวจสอบ Service Account / Network / Sheet ID");
-    // หยุด Cycle นี้ รอรอบถัดไป
-    return;
-  }
+  const displaysToMonitor = Object.values(config.displays);
+  const checkResults = []; 
+  let actualOfflineCount = 0; 
 
-  // ─────────────────────────────────────────────
-  // STEP 2: วิเคราะห์สถานะของแต่ละจอ
-  // (ตาม Flowchart: "อ่านข้อมูลและวิเคราะห์สถานะของแต่ละจอ")
-  // ─────────────────────────────────────────────
-  const checkResults = []; // เก็บผลรวมสำหรับบันทึก Log ลง Sheet ตอนท้าย
+  // ตั้งค่าสำหรับระบบตรวจสอบซ้ำ (Retry Configuration)
+  const MAX_RETRIES = 3;      // จำนวนรอบที่เช็กซ้ำทันที
+  const RETRY_DELAY = 2000;   // เวลาหน่วงก่อนเช็กซ้ำรอบถัดไป (2 วินาที)
 
-  for (const display of displayStatuses) {
-    logger.info(`\n--- ตรวจสอบจอ: ${display.display} (status: ${display.status}) ---`);
+  for (const displayConfig of displaysToMonitor) {
+    const displayName = displayConfig.name;
+    logger.info(`\n--- ตรวจสอบจอ: ${displayName} ---`);
+
+    if (!displayConfig.ssh.host) {
+      logger.warn(`⚠️ ข้ามการตรวจจอ ${displayName} เนื่องจากไม่มีการระบุ IP ใน .env`);
+      continue;
+    }
 
     const result = {
-      display: display.display,
-      status: display.status,
+      display: displayName,
+      status: "OK", 
       action: "NONE",
       success: true,
     };
 
-    // ─────────────────────────────────────────────
-    // STEP 3: สถานะหน้าจอปกติหรือไม่?
-    // (ตาม Flowchart: "สถานะหน้าจอปกติหรือไม่?")
-    // ─────────────────────────────────────────────
-    if (display.status === "OK") {
-      // ✅ ปกติ → บันทึก Log แล้วข้ามไปจอถัดไป
-      logger.info(`✅ ${display.display}: สถานะปกติ`);
+    // =========================================================
+    // ขั้นตอนที่ 1: เช็กสัญญาณชีพ OS ผ่าน SSH (พร้อมระบบวนเช็กซ้ำทันที)
+    // =========================================================
+    let isPiAlive = false;
+    let sentFirstAlert = false; 
+
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      isPiAlive = await testSSHConnection(displayConfig);
+      
+      if (isPiAlive) {
+        if (sentFirstAlert) {
+          logger.info(`✨ [Network Recovered] จอ ${displayName} ดีดกลับมาออนไลน์ปกติในรอบเช็กซ้ำที่ [${attempt}/${MAX_RETRIES}]`);
+          await notifyRecoverySuccess(displayName); 
+        } else if (attempt > 1) {
+          logger.info(`✨ [Network Recovered] จอ ${displayName} เชื่อมต่อ SSH ได้ปกติในรอบเช็กซ้ำที่ [${attempt}/${MAX_RETRIES}]`);
+        }
+        break; 
+      }
+
+      logger.warn(`⚠️ [Retry SSH] รอบที่ [${attempt}/${MAX_RETRIES}] จอ ${displayName} สัญญาณขาดหาย กำลังรอเช็กซ้ำ...`);
+      
+      if (attempt === 1) {
+        await notifyDisplayOffline(displayName);
+        sentFirstAlert = true;
+        
+        if (global.globalDisplayStatus) {
+          global.globalDisplayStatus[displayName] = {
+            status: "⚠️ สัญญาณแกว่ง! กำลังตรวจสอบเน็ตเวิร์กซ้ำซ้อน...",
+            isHealthy: false,
+            lastCheck: new Date().toLocaleTimeString("th-TH")
+          };
+        }
+      }
+
+      if (attempt < MAX_RETRIES) {
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY)); 
+      }
+    }
+
+    // 🔥 [แก้ไขจุดนี้] กรณีเช็กครบ 3 รอบแล้วบอร์ดยังดับสนิท (เครื่องดับ/เน็ตหลุดถาวรจริง ๆ)
+    if (!isPiAlive) {
+      logger.error(`❌ [Critical] ${displayName} เครื่องดับจริงหลังจากเช็กซ้ำครบ ${MAX_RETRIES} รอบ!`);
+      actualOfflineCount++;
+      
+      // 📣 ยิงไลน์แจ้งเตือนภัยขั้นสุดบอกให้ส่งเจ้าหน้าที่ไปดูหน้างานทันที
+      await notifyRemoteFailed(displayName);
+      
+      // 📺 [✨ ปรับเปลี่ยนข้อความตรงนี้] สลับการ์ดบนเว็บแดชบอร์ดให้โชว์แจ้งเตือนส่งช่างตรวจเช็กทันที
+      if (global.globalDisplayStatus) {
+        global.globalDisplayStatus[displayName] = {
+          status: "❌ เครื่องดับหรือเน็ตเวิร์กหลุดถาวร! กรุณาส่งเจ้าหน้าที่เข้าตรวจสอบหน้างานด่วน",
+          isHealthy: false,
+          lastCheck: new Date().toLocaleTimeString("th-TH")
+        };
+      }
+
+      result.status = "OFFLINE";
+      result.action = "HARDWARE_DOWN";
+      checkResults.push(result);
+      continue; 
+    } 
+
+    // =========================================================
+    // ขั้นตอนที่ 2: เช็ก Process เบราว์เซอร์ (พร้อมระบบวนเช็กซ้ำทันที)
+    // =========================================================
+    let isBrowserRunning = false;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      isBrowserRunning = await checkBrowserProcess(displayConfig);
+      
+      if (isBrowserRunning) {
+        if (attempt > 1) {
+          logger.info(`✨ [Process Recovered] จอ ${displayName} ตรวจพบ Browser รันปกติในรอบเช็กซ้ำที่ [${attempt}/${MAX_RETRIES}]`);
+        }
+        break; 
+      }
+
+      logger.warn(`⚠️ [Retry Browser] รอบที่ [${attempt}/${MAX_RETRIES}] จอ ${displayName} ไม่พบ Process กำลังรอเช็กซ้ำ...`);
+      if (attempt < MAX_RETRIES) {
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY)); 
+      }
+    }
+
+    if (isBrowserRunning) {
+      logger.info(`✅ [Healthy] ${displayName}: ทำงานปกติ`);
+      
+      if (global.globalDisplayStatus) {
+        global.globalDisplayStatus[displayName] = {
+          status: "เปิดทำงานปกติ ไม่พบสิ่งผิดพลาด ✅",
+          isHealthy: true,
+          lastCheck: new Date().toLocaleTimeString("th-TH")
+        };
+      }
+
+      result.status = "OK";
       result.action = "OK_NO_ACTION";
       checkResults.push(result);
-      continue; // ← ไปจอถัดไปเลย
-    }
-
-    // ─────────────────────────────────────────────
-    // STEP 4: ส่งแจ้งเตือนทันที (LINE / Email)
-    // (ตาม Flowchart: "ส่งข้อความแจ้งเตือนทันที! (LINE Messaging API / Email)")
-    // ─────────────────────────────────────────────
-    logger.warn(`🔴 ${display.display}: สถานะ OFFLINE — กำลังส่งแจ้งเตือน...`);
-    await notifyDisplayOffline(display.display);
-    result.action = "NOTIFIED";
-
-    // ─────────────────────────────────────────────
-    // STEP 5: ลองเชื่อมต่อ SSH ไปที่ Pi (Remote)
-    // (ตาม Flowchart: "ลองเชื่อมต่อ (Remote) ไปยังบอร์ด Raspberry Pi ของจอนั้นได้หรือไม่?")
-    // ─────────────────────────────────────────────
-    logger.info(`🔌 กำลังลอง SSH ไปยัง ${display.display}...`);
-    const canConnectSSH = await testSSHConnection(display.display);
-
-    if (canConnectSSH) {
-      // ─────────────────────────────────────────────
-      // STEP 5A: SSH เชื่อมได้ → ส่ง Pi รีสตาร์ทตัวเอง
-      // (ตาม Flowchart: "เชื่อมต่อสำเร็จ → ส่ง Pi รีสตาร์ทตัวเอง")
-      // ─────────────────────────────────────────────
-      logger.info(`🔄 SSH สำเร็จ — ส่งคำสั่งให้ ${display.display} รีสตาร์ทตัวเอง...`);
-      result.action = "SSH_SELF_RESTART";
-
-      // รอให้ Pi กลับมาหลัง Self-Restart
-      const piCameBack = await waitForPiToReturn(display.display);
-
-      if (piCameBack) {
-        // ─────────────────────────────────────────────
-        // STEP 5A-SUCCESS: Pi กลับมาปกติหลัง Self-Restart
-        // (ตาม Flowchart: "ตรวจสอบว่าหน้าจอ กลับมาเปิดปกติแล้วใช่ไหม? → Yes")
-        // "ส่ง Line แจ้ง: ระบบรีสตาร์ทเครื่องและเปิดหน้าจอสำเร็จ"
-        // ─────────────────────────────────────────────
-        logger.info(`✅ ${display.display}: กลับมาทำงานหลัง Self-Restart สำเร็จ`);
-        await notifyPiSelfRestartSuccess(display.display);
-        result.success = true;
-        result.action = "SELF_RESTART_SUCCESS";
-      } else {
-        // ─────────────────────────────────────────────
-        // STEP 5A-FAIL: Pi ยังมีปัญหาหลัง Self-Restart
-        // (ตาม Flowchart: "No → ส่ง Line แจ้ง: หน้าจอยังมีปัญหา/Remote ไม่สำเร็จ")
-        // → เจ้าหน้าที่เข้าตรวจสอบเอง
-        // ─────────────────────────────────────────────
-        logger.warn(`⚠️ ${display.display}: ยังมีปัญหาหลัง Self-Restart — แจ้งเจ้าหน้าที่`);
-        await notifyPiStillHasIssue(display.display);
-        result.success = false;
-        result.action = "SELF_RESTART_FAILED_MANUAL_REQUIRED";
-      }
     } else {
-      // ─────────────────────────────────────────────
-      // STEP 5B: SSH เชื่อมไม่ได้ → ระบบส่งคำสั่งบังคับ Restart อัตโนมัติจากภายนอก
-      // (ตาม Flowchart ล่าสุด: "เชื่อมต่อล้มเหลว → ระบบส่งคำสั่งบังคับรีสตาร์ทเครื่องอัตโนมัติ")
-      // ─────────────────────────────────────────────
-      logger.warn(`⚡ SSH ล้มเหลว — ระบบส่งคำสั่งบังคับ Restart ${display.display} จากภายนอก...`);
-      result.action = "FORCED_REMOTE_RESTART";
+      logger.info(`♻️ [Recovery Cycle] ดำเนินการสั่ง Workflow กู้คืนจอ ${displayName} เสร็จสิ้น`);
 
-      // 💡 เปลี่ยนมาใช้ฟังก์ชันบังคับรีสตาร์ทผ่านเครือข่าย/ฮาร์ดแวร์ภายนอกแทน เพราะ SSH พังอยู่
-      const restartSuccess = await forceNetworkRestartPi(display.display);
-
-      // 💡 ตรวจสอบซ้ำหลังจากส่งคำสั่ง (Double-Check) โดยใช้ลูปวนตรวจซ้ำที่ Claude เตรียมไว้ให้
-      logger.info(`⏳ รอตรวจเช็คว่า ${display.display} จะกลับมาออนไลน์หลังจากบังคับรีสตาร์ทหรือไม่...`);
-      const piIsBack = restartSuccess && (await waitForPiToReturn(display.display));
-
-      if (piIsBack) {
-        // ─────────────────────────────────────────────
-        // STEP 5B-SUCCESS: กู้คืนสำเร็จ
-        // (ตาม Flowchart: "ตรวจสอบว่าเครื่องกลับมาทำงานได้หรือไม่? → Yes")
-        // "แจ้งเตือนกู้คืนการเชื่อมต่อ Remote สำเร็จ"
-        // ─────────────────────────────────────────────
-        logger.info(`✅ ${display.display}: กู้คืนด้วยคำสั่งบังคับ Restart ภายนอกสำเร็จ!`);
-        await notifyRecoverySuccess(display.display);
-        result.success = true;
-        result.action = "FORCED_RESTART_SUCCESS";
-      } else {
-        // ─────────────────────────────────────────────
-        // STEP 5B-FAIL: กู้คืนไม่ได้ → แจ้งเจ้าหน้าที่
-        // (ตาม Flowchart: "No → ส่ง Line แจ้ง: เชื่อมต่อ Remote ไม่สำเร็จ")
-        // → เจ้าหน้าที่เข้าตรวจสอบเอง
-        // ─────────────────────────────────────────────
-        logger.error(`❌ ${display.display}: บังคับรีสตาร์ทแล้วก็ยังไม่กลับมา — ต้องการความช่วยเหลือจากเจ้าหน้าที่`);
-        await notifyRemoteFailed(display.display);
-        result.success = false;
-        result.action = "FORCED_RESTART_FAILED_MANUAL_REQUIRED";
-      }
+      result.status = "RECOVERED"; 
+      result.action = "FORCED_RESTART_SUCCESS";
+      checkResults.push(result);
     }
+  } 
 
-    checkResults.push(result);
-  } // ← end for loop ทุกจอ
-
-  // ─────────────────────────────────────────────
-  // STEP 6: บันทึก Log การทำงานปกติ + เก็บผลตรวจสอบลง Google Sheet
-  // (ตาม Flowchart: "บันทึก Log การทำงานปกติ" + "เก็บผลการตรวจสอบลง Google Sheet")
-  // ─────────────────────────────────────────────
-  logger.info("\n📝 บันทึกผลการตรวจสอบลง Google Sheet...");
+  logger.info("\n📝 บันทึกผลการตรวจสอบลงระบบ...");
   await saveCheckResults(checkResults);
 
-  // สรุปผลรอบนี้
-  const offlineCount = checkResults.filter((r) => r.status !== "OK").length;
-  logger.info(`\n========== สิ้นสุดรอบการตรวจสอบ | Offline: ${offlineCount}/${checkResults.length} จอ ==========\n`);
+  logger.info(`\n========== สิ้นสุดรอบการตรวจสอบ | Offline: ${actualOfflineCount}/${displaysToMonitor.length} จอ ==========\n`);
 }
 
 module.exports = { runMonitorCycle };

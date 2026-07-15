@@ -1,22 +1,54 @@
 // src/index.js
 // จุดเริ่มต้นของระบบ — ตั้งเวลาให้ runMonitorCycle() ทำงานทุก X นาที
+const path = require('path');
+const fs = require('fs');
+const express = require('express'); // ➕ แทรกเพิ่ม: ดึงโมดูลทำระบบ Web App
+const app = express();              // ➕ แทรกเพิ่ม: ประกาศใช้งาน Express
+const PORT = 4000;                  // ➕ แทรกเพิ่ม: ล็อกพอร์ต 4000 สำหรับเปิดดูหน้าเว็บ HTML
+
+const envPath = path.join(__dirname, '../../.env');
+if (fs.existsSync(envPath)) {
+  require('dotenv').config({ path: envPath });
+} else {
+  require('dotenv').config({ path: path.join(__dirname, '../.env') }); // สำรอง
+}
 const cron = require("node-cron");
 const config = require("./config/config");
 const logger = require("./utils/logger");
 const { runMonitorCycle } = require("./services/monitorService");
 
 // ─────────────────────────────────────────────────────────
-// แปลง config.checkIntervalMinutes → cron expression
-// เช่น 5 นาที → "*/5 * * * *" กําหนดและเปลี่ยนแปลงเวลาในไฟล์ .env.example
+// ➕ แทรกเพิ่ม: ประกาศตัวแปรส่วนกลาง (Global Variable) สำหรับแชร์สถานะให้หน้าเว็บ
 // ─────────────────────────────────────────────────────────
-//สั่งรันทุกๆหลักนาที (เพื่อทดสอบออโต้ลูป)
-//const cronExpression = `*/${config.checkIntervalMinutes} * * * *`;
-//สั่งรันทุกๆ 10 วินาที (เพื่อทดสอบออโต้ลูป)
-//const cronExpression = `*/10 * * * * *`;
+global.globalDisplayStatus = {
+  "Dicut": { status: "กำลังสแตนด์บาย...", isHealthy: true, lastCheck: "-" },
+  "SheetFold": { status: "กำลังสแตนด์บาย...", isHealthy: true, lastCheck: "-" },
+  "Tray": { status: "กำลังสแตนด์บาย...", isHealthy: true, lastCheck: "-" },
+  "RollFold": { status: "กำลังสแตนด์บาย...", isHealthy: true, lastCheck: "-" }
+};
 
+// 🌐 ➕ แทรกเพิ่ม: สร้าง API Route เพื่อส่งค่า JSON ออกไปแสดงผลบนหน้าเว็บ
+app.get('/api/status', (req, res) => {
+  res.json(global.globalDisplayStatus);
+});
 
+// 📂 ➕ แทรกเพิ่ม: กำหนด Route หลักเพื่อสั่งโหลดหน้าเว็บ HTML แดชบอร์ด
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
+});
+
+// 🚀 ➕ แทรกเพิ่ม: สั่งรันเว็บเซิร์ฟเวอร์มอนิเตอร์ส่วนกลาง
+app.listen(PORT, () => {
+  logger.info(`🌐 [Web Dashboard] หน้าเว็บมอนิเตอร์สแตนด์บายแล้วที่ http://localhost:${PORT}`);
+});
+
+// ─────────────────────────────────────────────────────────
+// โค้ดเดิมคงไว้ทั้งหมด — แปลง config.checkIntervalMinutes → cron expression
+// ─────────────────────────────────────────────────────────
 logger.info("🚀 Pi Monitor เริ่มทำงาน");
-logger.info(`⏱  ตรวจสอบทุก ${config.checkIntervalMinutes} นาที (cron: "${cronExpression}")`);
+const { sendLineMessage } = require("./services/notificationService");
+
+logger.info(`⏱  ตรวจสอบทุก ${config.checkIntervalMinutes} นาที`);
 logger.info(`📺 จำนวนหน้าจอที่ดูแล: ${Object.keys(config.displays).length} จอ`);
 logger.info(`   → ${Object.keys(config.displays).join(", ")}`);
 
@@ -34,7 +66,7 @@ logger.info(`   → ${Object.keys(config.displays).join(", ")}`);
 // ─────────────────────────────────────────────────────────
 // ตั้ง Cron Job ให้รันซ้ำทุก X นาที
 // ─────────────────────────────────────────────────────────
-cron.schedule(cronExpression, async () => {
+cron.schedule(`*/${config.checkIntervalMinutes} * * * *`, async () => {
   try {
     await runMonitorCycle();
   } catch (err) {
@@ -58,7 +90,6 @@ process.on("SIGTERM", () => {
 process.on("uncaughtException", (err) => {
   logger.error(`💥 Uncaught Exception: ${err.message}`);
   logger.error(err.stack);
-  // ไม่ exit เพื่อให้ระบบยังทำงานต่อได้
 });
 
 process.on("unhandledRejection", (reason) => {

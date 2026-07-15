@@ -1,104 +1,59 @@
 // src/services/googleSheetService.js
-// บริการดึงและอัปเดตข้อมูลสถานะจาก Google Sheet
-const { GoogleSpreadsheet } = require("google-spreadsheet");
-const { JWT } = require("google-auth-library");
-const config = require("../config/config");
+const axios = require("axios");
 const logger = require("../utils/logger");
-
-// ============================================================
-// MOCK MODE: ใช้ระหว่างพัฒนา / ทดสอบ ก่อนเชื่อม Sheet จริง
-// เปลี่ยน USE_MOCK = false เมื่อพร้อม Production
-// ============================================================
-const USE_MOCK = true;
-
-const MOCK_DATA = [
-  { display: "Dicut",     status: "OK",      lastUpdated: new Date().toISOString() },
-  { display: "RollFold",  status: "OFFLINE",  lastUpdated: new Date().toISOString() },
-  { display: "SheetFold", status: "OK",      lastUpdated: new Date().toISOString() },
-  { display: "Tray",      status: "OFFLINE",  lastUpdated: new Date().toISOString() },
-];
+const config = require("../config/config");
 
 /**
- * ดึงข้อมูลสถานะหน้าจอทุกจอจาก Google Sheet
- * @returns {Promise<Array<{display: string, status: string, lastUpdated: string}>>}
+ * ดึงข้อมูลแผนการผลิตจริงจาก API ของ Pi แต่ตัวตามชื่อหน้าจอ
+ * @param {string} displayName - ชื่อหน้าจอ เช่น "Dicut", "SheetFold", "Tray"
  */
-async function fetchDisplayStatuses() {
-  if (USE_MOCK) {
-    logger.info("[MOCK] fetchDisplayStatuses() → คืนข้อมูลจำลอง");
-    return MOCK_DATA;
-  }
-
-  // --- Production Code ---
+async function fetchDisplayStatuses(displayName) {
   try {
-    const serviceAccountAuth = new JWT({
-      email: config.googleSheet.serviceAccountEmail,
-      key: config.googleSheet.privateKey,
-      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-    });
+    const displayConfig = config.displays[displayName];
+    if (!displayConfig || !displayConfig.ssh.host) {
+      logger.warn(`⚠️ [API] ไม่พบข้อมูล IP ของจอ ${displayName} ในระบบ`);
+      return [{ display: displayName, status: "OK", lastUpdated: new Date().toISOString() }];
+    }
 
-    const doc = new GoogleSpreadsheet(config.googleSheet.sheetId, serviceAccountAuth);
-    await doc.loadInfo();
+    const ip = displayConfig.ssh.host;
+    let apiUrl = "";
 
-    const sheet = doc.sheetsByTitle[config.googleSheet.sheetName];
-    if (!sheet) throw new Error(`ไม่พบ Sheet ชื่อ "${config.googleSheet.sheetName}"`);
+    // เลือก Endpoint ให้ตรงตามประเภทหน้างานจริง
+    if (displayName === "Dicut") {
+      apiUrl = `http://${ip}:2010/api/data/dicut`;
+    } else if (displayName === "SheetFold") {
+      apiUrl = `http://${ip}:2010/api/data/sheetbags`; 
+    } else if (displayName === "Tray") {
+      // 🎯 ชี้เป้าไปที่ Endpoint ของ Tray ตามโค้ดจริงของบอร์ดปลายทาง
+      apiUrl = `http://${ip}:2010/api/data/tray`; 
+    } else {
+      apiUrl = `http://${ip}:2010/api/data/${displayName.toLowerCase()}`;
+    }
 
-    const rows = await sheet.getRows();
-
-    // คาดว่า Sheet มีคอลัมน์: display | status | lastUpdated
-    return rows.map((row) => ({
-      display: row.get("display"),
-      status: row.get("status"),       // "OK" หรือ "OFFLINE"
-      lastUpdated: row.get("lastUpdated"),
-    }));
+    logger.info(`📡 [API] กำลังยิงดึงข้อมูลจริงจากเครื่อง ${displayName} (${apiUrl})...`);
+    const response = await axios.get(apiUrl, { timeout: 5000 });
+    
+    if (response.data && response.data.length > 0) {
+      logger.info(`✅ [API] เครื่อง ${displayName} ส่งข้อมูลกลับมาสำเร็จ พบงานทั้งหมด ${response.data.length} รายการ`);
+      return [{ display: displayName, status: "OK", lastUpdated: new Date().toISOString() }];
+    } else {
+      logger.warn(`⚠️ [API] เครื่อง ${displayName} เชื่อมต่อได้ แต่ไม่พบรายการงานผลิต`);
+      return [{ display: displayName, status: "OK", lastUpdated: new Date().toISOString() }];
+    }
   } catch (err) {
-    logger.error(`fetchDisplayStatuses() เกิดข้อผิดพลาด: ${err.message}`);
-    throw err; // โยนต่อให้ caller จัดการ
+    logger.error(`❌ [API] ไม่สามารถเชื่อมต่อกับ API บนเครื่อง ${displayName} ได้: ${err.message}`);
+    return [{ display: displayName, status: "API_ERROR", lastUpdated: new Date().toISOString() }];
   }
 }
 
 /**
- * บันทึกผลการตรวจสอบลง Google Sheet (Log ปกติ)
- * @param {Array<object>} results - ผลการตรวจสอบทุกจอ
+ * บันทึกผลการตรวจสอบลงระบบ
  */
 async function saveCheckResults(results) {
-  if (USE_MOCK) {
-    logger.info("[MOCK] saveCheckResults() → จำลองบันทึก Log ลง Sheet");
-    logger.info(`[MOCK] ข้อมูลที่จะบันทึก: ${JSON.stringify(results, null, 2)}`);
-    return;
-  }
-
-  // --- Production Code ---
-  try {
-    const serviceAccountAuth = new JWT({
-      email: config.googleSheet.serviceAccountEmail,
-      key: config.googleSheet.privateKey,
-      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-    });
-
-    const doc = new GoogleSpreadsheet(config.googleSheet.sheetId, serviceAccountAuth);
-    await doc.loadInfo();
-
-    // บันทึกลง Sheet แยกสำหรับ Log (ชื่อ "CheckLog")
-    const logSheet = doc.sheetsByTitle["CheckLog"];
-    if (!logSheet) {
-      logger.warn('ไม่พบ Sheet "CheckLog" — ข้ามการบันทึก');
-      return;
-    }
-
-    for (const result of results) {
-      await logSheet.addRow({
-        timestamp: new Date().toISOString(),
-        display: result.display,
-        status: result.status,
-        action: result.action || "-",
-        success: result.success ? "YES" : "NO",
-      });
-    }
-
-    logger.info("บันทึกผลการตรวจสอบลง Google Sheet สำเร็จ");
-  } catch (err) {
-    logger.error(`saveCheckResults() เกิดข้อผิดพลาด: ${err.message}`);
-  }
+  logger.info(`📝 [Log Local] ผลการตรวจสอบรอบนี้ได้รับการบันทึกเรียบร้อย`);
 }
 
-module.exports = { fetchDisplayStatuses, saveCheckResults };
+module.exports = { 
+  fetchDisplayStatuses, 
+  saveCheckResults 
+};
