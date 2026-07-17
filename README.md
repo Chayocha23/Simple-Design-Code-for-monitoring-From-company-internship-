@@ -337,3 +337,163 @@ sudo fuser 3000/tcp
 ```bash
 sudo fuser 2010/tcp
 ```
+
+## 🐳 คู่มือการบริหารจัดการระบบด้วย Docker (Containerization)
+
+> ระบบนี้ได้รับการยกระดับสถาปัตยกรรมให้อยู่ในรูปแบบ Docker Container เพื่อให้สามารถนำไปใช้งานบนคอมพิวเตอร์เครื่องใหม่ได้ทันที โดยไม่จำเป็นต้องติดตั้ง Node.js หรือ PM2 ที่เครื่องปลายทาง
+
+---
+
+### 📌 สิ่งที่ต้องติดตั้งก่อนเริ่มใช้งาน (Prerequisites)
+
+- ติดตั้ง **Docker Desktop** (Windows/macOS)
+- หรือ **Docker Engine** (Linux)
+
+ตรวจสอบการติดตั้ง
+
+```bash
+docker --version
+```
+
+---
+
+## 🛠️ 1. สร้าง Docker Image
+
+เปิด Terminal ภายในโฟลเดอร์โปรเจกต์
+
+```bash
+docker build -t pi-monitor-app .
+```
+
+---
+
+## ▶️ 2. เริ่มต้นระบบ
+
+```bash
+docker run -d \
+  --name pi-monitor-service \
+  -p 4000:4000 \
+  --restart unless-stopped \
+  pi-monitor-app
+```
+
+> **หมายเหตุ**
+>
+> `--restart unless-stopped`
+>
+> เมื่อเครื่องเปิดใหม่ Docker จะเริ่ม Container ให้อัตโนมัติ ยกเว้นผู้ดูแลระบบเป็นผู้สั่ง Stop เอง
+
+---
+
+## 📊 3. ตรวจสอบสถานะระบบ
+
+### ดู Container ที่กำลังทำงาน
+
+```bash
+docker ps
+```
+
+### ดู Container ทั้งหมด
+
+```bash
+docker ps -a
+```
+
+### ดู Log แบบ Real-time
+
+```bash
+docker logs -f pi-monitor-service
+```
+
+> กด **Ctrl + C** เพื่อออกจากหน้าจอ Log โดย Container จะยังคงทำงานต่อ
+
+---
+
+## 🔄 4. คำสั่งบริหารจัดการระบบ
+
+### รีสตาร์ทระบบ
+
+```bash
+docker restart pi-monitor-service
+```
+
+### หยุดระบบ
+
+```bash
+docker stop pi-monitor-service
+```
+
+### เปิดระบบอีกครั้ง
+
+```bash
+docker start pi-monitor-service
+```
+
+### ลบ Container
+
+```bash
+docker rm -f pi-monitor-service
+```
+
+### ลบ Docker Image
+
+```bash
+docker rmi pi-monitor-app
+```
+
+---
+
+## 🌐 5. เข้าใช้งาน Dashboard
+
+เมื่อ Container มีสถานะ **Up** แล้ว
+
+เปิด
+
+```text
+http://172.16.0.213:4000
+```
+
+---
+
+### เงื่อนไข
+
+- ต้องอยู่ในเครือข่าย LAN หรือ Wi-Fi เดียวกัน
+- รองรับ
+  - คอมพิวเตอร์
+  - โทรศัพท์มือถือ
+  - แท็บเล็ต
+- ไม่สามารถเข้าผ่านอินเทอร์เน็ตภายนอกได้
+
+---
+
+## 💡 Workflow การอัปเดตโปรแกรม
+
+เมื่อมีการแก้ไข Source Code
+
+### 1. หยุดและลบ Container เดิม
+
+```bash
+docker rm -f pi-monitor-service
+```
+
+### 2. Build Image ใหม่
+
+```bash
+docker build -t pi-monitor-app .
+```
+
+### 3. เปิดระบบใหม่
+
+```bash
+docker run -d \
+  --name pi-monitor-service \
+  -p 4000:4000 \
+  --restart unless-stopped \
+  pi-monitor-app
+```
+
+---
+
+## ✅ Deployment เสร็จสมบูรณ์
+
+หลังจากดำเนินการครบทุกขั้นตอน ระบบ Pi-Monitor จะทำงานอยู่ภายใน Docker Container และพร้อมใช้งานทันที โดย Docker จะเป็นผู้ดูแล Process แทน PM2 ทำให้ไม่จำเป็นต้องติดตั้ง Node.js หรือ PM2 บนเครื่องปลายทางอีกต่อไป

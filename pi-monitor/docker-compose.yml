@@ -1,0 +1,20 @@
+services:
+  pi-monitor-app:
+    container_name: pi-monitor-service
+
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    image: pi-monitor-app:latest
+
+    ports:
+      - "4000:4000"
+
+    restart: always
+
+    env_file:
+      - ../.env
+
+    volumes:
+      - ./logs:/app/logs
